@@ -1,6 +1,6 @@
 # Bybit Signal Bot
 
-Автоматическое исполнение торговых сигналов из Telegram на бирже Bybit: спотовый бот, фьючерсный бот (USDT Perpetual) и Telegram‑шлюз для переключения режимов `/spot` и `/futures`.[web:13][web:77]
+Автоматическое исполнение торговых сигналов из Telegram на бирже Bybit: спотовый бот, фьючерсный бот (USDT Perpetual) и Telegram‑шлюз для переключения режимов `/spot` и `/futures`.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![Telegram](https://img.shields.io/badge/Telegram-Bot-blue)
@@ -23,14 +23,14 @@
 
 - Приём сигналов из Telegram (формат `#ETH bullish`, `Short #ETH #BTC`).  
 
-- Исполнение сигналов на **споте** и **фьючерсах (USDT perpetual)** через Bybit V5 API.[web:13][web:77]  
+- Исполнение сигналов на **споте** и **фьючерсах (USDT perpetual)** через Bybit V5 API.  
 
 - Автоматическая установка **тейк‑профита +15%**:
   - на споте — отдельный Limit TP‑ордер;  
-  - на фьючерсах — TP через `set-trading-stop` (TP/SL во вкладке Bybit).[web:38][web:82]  
+  - на фьючерсах — TP через `set-trading-stop` (TP/SL во вкладке Bybit).  
 - Переключение режима прямо в Telegram: `/spot` и `/futures`.  
 
-- Учёт торговых правил Bybit (`tickSize`, `qtyStep`, `minOrderQty`) для корректных объёма и цены.[web:37][web:38]
+- Учёт торговых правил Bybit (`tickSize`, `qtyStep`, `minOrderQty`) для корректных объёма и цены.
 
 ---
 
@@ -145,7 +145,7 @@ python3 gateway/telegram_gateway.py
 
 - `#ETH bullish`  
   - Отправляется `Market Buy` по `ETHUSDT` на сумму `TRADE_AMOUNT_USD` (через V5 `/v5/order/create`). 
-  - Затем бот запрашивает `instruments-info` и `get_tickers`, рассчитывает TP‑цену `lastPrice * 1.15`, округляет её по `tickSize` и ставит отдельный **Limit Sell TP** ордер.[web:38]
+  - Затем бот запрашивает `instruments-info` и `get_tickers`, рассчитывает TP‑цену `lastPrice * 1.15`, округляет её по `tickSize` и ставит отдельный **Limit Sell TP** ордер.
 
 - `Short #ETH #BTC`  
   - Для каждого указанного тикера отправляется `Market Sell` на сумму `TRADE_AMOUNT_USD`.  
