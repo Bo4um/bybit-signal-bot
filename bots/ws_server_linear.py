@@ -164,6 +164,30 @@ def validate_tickers(session: HTTP, tickers: list[str], category: str) -> list[s
         logger.info(f"Ticker validated: {ticker}")
     return valid
 
+def check_position_exists(session: HTTP, ticker: str, category: str, side: str) -> bool:
+    """
+    Проверка наличия открытой позиции.
+    Для linear: проверка открытой позиции через get_positions_info.
+    """
+    try:
+        if category == "linear":
+            # Проверка открытой позиции
+            r = session.get_positions_info(category=category, symbol=f"{ticker}USDT")
+            positions = r.get("result", {}).get("list", [])
+            for pos in positions:
+                size = float(pos.get("size", 0))
+                pos_side = pos.get("side")
+                if size > 0 and pos_side == side:
+                    logger.info(f"Open {side} position exists for {ticker}, skipping")
+                    return True
+        return False
+    except APIError as e:
+        logger.error(f"check_position_exists {ticker}: {e.ret_code} - {e.ret_msg}")
+        return False  # Не блокируем торговлю при ошибке проверки
+    except Exception as e:
+        logger.error(f"check_position_exists {ticker}: {e}")
+        return False
+
 # ---------- Bybit helpers (linear) ----------
 
 def create_session() -> HTTP:
@@ -314,6 +338,12 @@ async def handle_signal(signal_text: str):
 
     for ticker in valid_symbols:
         logger.info(f"Working {ticker}USDT linear ...")
+        
+        # Проверка на дубликат позиции
+        position_side = "Buy" if action == "long" else "Sell"
+        if check_position_exists(session, ticker, category="linear", side=position_side):
+            continue
+        
         try:
             pos = open_linear_position(session, ticker, action)
             if not pos:
