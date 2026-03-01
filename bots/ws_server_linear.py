@@ -6,15 +6,45 @@ Bybit Signal Bot - USDT Perpetual (linear):
 """
 
 import asyncio
+import logging
 import os
 import re
 from datetime import datetime
+from pathlib import Path
 
 import websockets
 from dotenv import load_dotenv
 from pybit.unified_trading import HTTP
 
 load_dotenv()
+
+# Настройка логирования
+LOG_DIR = Path(__file__).parent.parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+logger = logging.getLogger("futures_bot")
+logger.setLevel(logging.DEBUG)
+
+# Консольный обработчик
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_formatter = logging.Formatter(
+    fmt="[FUTURES %(asctime)s] %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+console_handler.setFormatter(console_formatter)
+
+# Файловый обработчик
+file_handler = logging.FileHandler(LOG_DIR / "futures.log", encoding="utf-8")
+file_handler.setLevel(logging.DEBUG)
+file_formatter = logging.Formatter(
+    fmt="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+file_handler.setFormatter(file_formatter)
+
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
 
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
@@ -24,11 +54,7 @@ WS_PORT = 8766
 TP_PCT = 0.15
 DEMO = os.getenv("BYBIT_DEMO", "true").lower() == "true"
 
-def log(msg: str):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[FUTURES {ts}] {msg}")
-
-log(f"Bybit Futures Bot started | amount={TRADE_AMOUNT_USD} USDT, lev=x{LEVERAGE}, demo={DEMO}, TP={TP_PCT*100:.0f}%")
+logger.info(f"Bybit Futures Bot started | amount={TRADE_AMOUNT_USD} USDT, lev=x{LEVERAGE}, demo={DEMO}, TP={TP_PCT*100:.0f}%")
 
 # ---------- Парсинг сигналов ----------
 
@@ -61,11 +87,11 @@ def get_last_price(session, symbol: str):
         r = session.get_tickers(category="linear", symbol=f"{symbol}USDT")
         lst = r.get("result", {}).get("list", [])
         if not lst:
-            log(f"WARNING no ticker {symbol}USDT (linear)")
+            logger.warning(f"No ticker {symbol}USDT (linear)")
             return None
         return float(lst[0]["lastPrice"])
     except Exception as e:
-        log(f"ERROR get_tickers linear {symbol}: {e}")
+        logger.error(f"get_tickers linear {symbol}: {e}")
         return None
 
 def get_linear_instrument_info(session, symbol: str):
@@ -73,7 +99,7 @@ def get_linear_instrument_info(session, symbol: str):
         r = session.get_instruments_info(category="linear", symbol=f"{symbol}USDT")
         lst = r.get("result", {}).get("list", [])
         if not lst:
-            log(f"WARNING no instruments-info for {symbol}USDT linear")
+            logger.warning(f"No instruments-info for {symbol}USDT linear")
             return None
         info = lst[0]
         lot = info.get("lotSizeFilter", {})
@@ -81,7 +107,7 @@ def get_linear_instrument_info(session, symbol: str):
         qty_step = float(lot.get("qtyStep", "0.001"))
         return {"minQty": min_qty, "qtyStep": qty_step}
     except Exception as e:
-        log(f"ERROR get_instruments_info linear {symbol}: {e}")
+        logger.error(f"get_instruments_info linear {symbol}: {e}")
         return None
 
 def round_up_to_step(value: float, step: float) -> float:
@@ -96,9 +122,9 @@ def set_leverage(session, symbol: str):
             buyLeverage=str(LEVERAGE),
             sellLeverage=str(LEVERAGE),
         )
-        log(f"set_leverage: {resp.get('retCode')} {resp.get('retMsg')}")
+        logger.info(f"set_leverage: {resp.get('retCode')} {resp.get('retMsg')}")
     except Exception as e:
-        log(f"ERROR set_leverage {symbol}: {e}")
+        logger.error(f"set_leverage {symbol}: {e}")
 
 def calc_qty_usdt(session, symbol: str, last_price: float) -> float:
     info = get_linear_instrument_info(session, symbol)
@@ -114,7 +140,7 @@ def calc_qty_usdt(session, symbol: str, last_price: float) -> float:
 async def open_linear_position(session, symbol: str, direction: str):
     last = get_last_price(session, symbol)
     if not last:
-        log("WARNING no price, skip position")
+        logger.warning("No price, skip position")
         return None
 
     qty = calc_qty_usdt(session, symbol, last)
@@ -131,9 +157,9 @@ async def open_linear_position(session, symbol: str, direction: str):
         "positionIdx": 0,
     }
 
-    log(f"Market {direction.upper()} request: {params}")
+    logger.info(f"Market {direction.upper()} request: {params}")
     resp = session.place_order(**params)
-    log(f"Market response: {resp.get('retCode')} {resp.get('retMsg')}")
+    logger.info(f"Market response: {resp.get('retCode')} {resp.get('retMsg')}")
     if resp.get("retCode") != 0:
         return None
 
@@ -152,9 +178,9 @@ def set_tp_for_position(session, symbol: str, entry_price: float, side: str):
         "tpTriggerBy": "LastPrice",
     }
 
-    log(f"set_trading_stop TP request: {params}")
+    logger.info(f"set_trading_stop TP request: {params}")
     resp = session.set_trading_stop(**params)
-    log(f"set_trading_stop response: {resp.get('retCode')} {resp.get('retMsg')}")
+    logger.info(f"set_trading_stop response: {resp.get('retCode')} {resp.get('retMsg')}")
     return resp
 
 # ---------- Обработка сигналов ----------
@@ -162,55 +188,55 @@ def set_tp_for_position(session, symbol: str, entry_price: float, side: str):
 async def handle_signal(signal_text: str):
     action, symbols = parse_signal(signal_text)
     if not action:
-        log(f"IGNORE unknown signal: {signal_text}")
+        logger.warning(f"IGNORE unknown signal: {signal_text}")
         return
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     direction = "LONG" if action == "long" else "SHORT"
-    log(f"SIGNAL: {signal_text} → {direction} {symbols}, amount={TRADE_AMOUNT_USD} USDT, lev=x{LEVERAGE}")
+    logger.info(f"SIGNAL: {signal_text} → {direction} {symbols}, amount={TRADE_AMOUNT_USD} USDT, lev=x{LEVERAGE}")
 
     try:
         session = create_session()
     except Exception as e:
-        log(f"ERROR create_session: {e}")
+        logger.error(f"create_session: {e}")
         return
 
     for ticker in symbols:
-        log(f"Working {ticker}USDT linear ...")
+        logger.info(f"Working {ticker}USDT linear ...")
         try:
             pos = await open_linear_position(session, ticker, action)
             if not pos:
-                log(f"ERROR position not opened for {ticker}")
+                logger.error(f"Position not opened for {ticker}")
                 continue
 
             side = pos["side"]
             entry = pos["entry_price"]
             tp_resp = set_tp_for_position(session, ticker, entry, side)
             if tp_resp.get("retCode") == 0:
-                log(f"{ts} {direction} {ticker} with TP set")
+                logger.info(f"{ts} {direction} {ticker} with TP set")
             else:
-                log(f"{ts} {direction} {ticker}, TP not set")
+                logger.info(f"{ts} {direction} {ticker}, TP not set")
         except Exception as e:
-            log(f"ERROR processing {ticker}: {e}")
+            logger.error(f"Processing {ticker}: {e}")
 
-    log("-" * 50)
+    logger.info("-" * 50)
 
 # ---------- WebSocket ----------
 
 async def websocket_handler(*args, **kwargs):
     websocket = args[0]
-    log("Client connected (futures)")
+    logger.info("Client connected (futures)")
     try:
         async for message in websocket:
-            log(f"FROM TG: {message.strip()}")
+            logger.info(f"FROM TG: {message.strip()}")
             await handle_signal(message)
     except Exception as e:
-        log(f"WS error: {e}")
+        logger.error(f"WS error: {e}")
 
 async def main():
-    log(f"WebSocket server: ws://localhost:{WS_PORT}")
+    logger.info(f"WebSocket server: ws://localhost:{WS_PORT}")
     server = await websockets.serve(websocket_handler, "localhost", WS_PORT)
-    log("Futures bot ready, waiting for signals...")
+    logger.info("Futures bot ready, waiting for signals...")
     await server.wait_closed()
 
 if __name__ == "__main__":

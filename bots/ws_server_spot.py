@@ -6,15 +6,45 @@ Bybit Signal Bot - SPOT:
 """
 
 import asyncio
+import logging
 import os
 import re
 from datetime import datetime
+from pathlib import Path
 
 import websockets
 from dotenv import load_dotenv
 from pybit.unified_trading import HTTP
 
 load_dotenv()
+
+# Настройка логирования
+LOG_DIR = Path(__file__).parent.parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+logger = logging.getLogger("spot_bot")
+logger.setLevel(logging.DEBUG)
+
+# Консольный обработчик
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_formatter = logging.Formatter(
+    fmt="[SPOT %(asctime)s] %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+console_handler.setFormatter(console_formatter)
+
+# Файловый обработчик с ротацией
+file_handler = logging.FileHandler(LOG_DIR / "spot.log", encoding="utf-8")
+file_handler.setLevel(logging.DEBUG)
+file_formatter = logging.Formatter(
+    fmt="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+file_handler.setFormatter(file_formatter)
+
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
 
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
@@ -23,11 +53,7 @@ WS_PORT = 8765
 TP_PCT = 0.15  # +15%
 DEMO = os.getenv("BYBIT_DEMO", "true").lower() == "true"
 
-def log(msg: str):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[SPOT {ts}] {msg}")
-
-log(f"Bybit Spot Bot started | amount={TRADE_AMOUNT_USD} USDT, demo={DEMO}, TP={TP_PCT*100:.0f}%")
+logger.info(f"Bybit Spot Bot started | amount={TRADE_AMOUNT_USD} USDT, demo={DEMO}, TP={TP_PCT*100:.0f}%")
 
 # ---------- Парсинг сигналов ----------
 
@@ -60,11 +86,11 @@ def get_last_price(session, symbol: str):
         r = session.get_tickers(category="spot", symbol=f"{symbol}USDT")
         lst = r.get("result", {}).get("list", [])
         if not lst:
-            log(f"WARNING no ticker {symbol}USDT in get_tickers")
+            logger.warning(f"No ticker {symbol}USDT in get_tickers")
             return None
         return float(lst[0]["lastPrice"])
     except Exception as e:
-        log(f"ERROR get_tickers {symbol}: {e}")
+        logger.error(f"get_tickers {symbol}: {e}")
         return None
 
 def get_instrument_info(session, symbol: str):
@@ -72,7 +98,7 @@ def get_instrument_info(session, symbol: str):
         r = session.get_instruments_info(category="spot", symbol=f"{symbol}USDT")
         lst = r.get("result", {}).get("list", [])
         if not lst:
-            log(f"WARNING no instruments-info for {symbol}USDT")
+            logger.warning(f"No instruments-info for {symbol}USDT")
             return None
         info = lst[0]
         price_filter = info.get("priceFilter", {})
@@ -82,7 +108,7 @@ def get_instrument_info(session, symbol: str):
         min_qty = float(lot_filter.get("minOrderQty", "0.0001"))
         return {"tickSize": tick_size, "qtyStep": qty_step, "minQty": min_qty}
     except Exception as e:
-        log(f"ERROR get_instruments_info {symbol}: {e}")
+        logger.error(f"get_instruments_info {symbol}: {e}")
         return None
 
 def round_down(value: float, step: float) -> float:
@@ -97,9 +123,9 @@ async def place_spot_market_order(session, symbol: str, side: str):
         "marketUnit": "quoteCoin",
         "qty": str(TRADE_AMOUNT_USD),
     }
-    log(f"Market {side} request: {params}")
+    logger.info(f"Market {side} request: {params}")
     resp = session.place_order(**params)
-    log(f"Market response: {resp.get('retCode')} {resp.get('retMsg')}")
+    logger.info(f"Market response: {resp.get('retCode')} {resp.get('retMsg')}")
     base_qty = None
     last = get_last_price(session, symbol)
     if last:
@@ -109,11 +135,11 @@ async def place_spot_market_order(session, symbol: str, side: str):
 async def place_spot_tp_limit_order(session, symbol: str, base_qty: float):
     info = get_instrument_info(session, symbol)
     if not info:
-        log("WARNING no instrument info, skip TP")
+        logger.warning("No instrument info, skip TP")
         return None
     last = get_last_price(session, symbol)
     if not last:
-        log("WARNING no last price, skip TP")
+        logger.warning("No last price, skip TP")
         return None
 
     tick = info["tickSize"]
@@ -137,9 +163,9 @@ async def place_spot_tp_limit_order(session, symbol: str, base_qty: float):
         "qty": qty_str,
         "timeInForce": "GTC",
     }
-    log(f"TP Limit request: {params}")
+    logger.info(f"TP Limit request: {params}")
     resp = session.place_order(**params)
-    log(f"TP Limit response: {resp.get('retCode')} {resp.get('retMsg')}")
+    logger.info(f"TP Limit response: {resp.get('retCode')} {resp.get('retMsg')}")
     return resp
 
 # ---------- Обработка сигналов ----------
@@ -147,24 +173,24 @@ async def place_spot_tp_limit_order(session, symbol: str, base_qty: float):
 async def handle_signal(signal_text: str):
     action, symbols = parse_signal(signal_text)
     if not action:
-        log(f"IGNORE unknown signal: {signal_text}")
+        logger.warning(f"IGNORE unknown signal: {signal_text}")
         return
 
     side = "Buy" if action == "buy" else "Sell"
-    log(f"SIGNAL: {signal_text} → {action.upper()} {symbols}, amount={TRADE_AMOUNT_USD} USDT")
+    logger.info(f"SIGNAL: {signal_text} → {action.upper()} {symbols}, amount={TRADE_AMOUNT_USD} USDT")
 
     try:
         session = create_session()
     except Exception as e:
-        log(f"ERROR create_session: {e}")
+        logger.error(f"create_session: {e}")
         return
 
     for ticker in symbols:
-        log(f"Working {ticker}USDT ...")
+        logger.info(f"Working {ticker}USDT ...")
         try:
             resp, base_qty_est = await place_spot_market_order(session, ticker, side)
             if resp.get("retCode") != 0:
-                log(f"ERROR market order rejected: {resp}")
+                logger.error(f"Market order rejected: {resp}")
                 continue
 
             action_word = "куплено" if side == "Buy" else "продано"
@@ -173,32 +199,32 @@ async def handle_signal(signal_text: str):
             if side == "Buy" and base_qty_est:
                 tp_resp = await place_spot_tp_limit_order(session, ticker, base_qty_est)
                 if tp_resp and tp_resp.get("retCode") == 0:
-                    log(base_log + " + TP-limit set")
+                    logger.info(f"{base_log} + TP-limit set")
                 else:
-                    log(base_log + ", TP-limit not set")
+                    logger.info(f"{base_log}, TP-limit not set")
             else:
-                log(base_log + ", TP not set (Sell or no qty)")
+                logger.info(f"{base_log}, TP not set (Sell or no qty)")
         except Exception as e:
-            log(f"ERROR processing {ticker}: {e}")
+            logger.error(f"Processing {ticker}: {e}")
 
-    log("-" * 50)
+    logger.info("-" * 50)
 
 # ---------- WebSocket ----------
 
 async def websocket_handler(*args, **kwargs):
     websocket = args[0]
-    log("Client connected (spot)")
+    logger.info("Client connected (spot)")
     try:
         async for message in websocket:
-            log(f"FROM TG: {message.strip()}")
+            logger.info(f"FROM TG: {message.strip()}")
             await handle_signal(message)
     except Exception as e:
-        log(f"WS error: {e}")
+        logger.error(f"WS error: {e}")
 
 async def main():
-    log(f"WebSocket server: ws://localhost:{WS_PORT}")
+    logger.info(f"WebSocket server: ws://localhost:{WS_PORT}")
     server = await websockets.serve(websocket_handler, "localhost", WS_PORT)
-    log("Spot bot ready, waiting for signals...")
+    logger.info("Spot bot ready, waiting for signals...")
     await server.wait_closed()
 
 if __name__ == "__main__":

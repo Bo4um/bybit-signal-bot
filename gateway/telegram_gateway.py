@@ -7,6 +7,7 @@ Telegram → WebSocket шлюз с режимами:
 
 import logging
 import os
+from pathlib import Path
 
 import websockets
 from dotenv import load_dotenv
@@ -21,12 +22,37 @@ from telegram.ext import (
 
 load_dotenv()
 
+# Настройка логирования
+LOG_DIR = Path(__file__).parent.parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+logger = logging.getLogger("telegram_gateway")
+logger.setLevel(logging.DEBUG)
+
+# Консольный обработчик
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_formatter = logging.Formatter(
+    fmt="[GATEWAY %(asctime)s] %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+console_handler.setFormatter(console_formatter)
+
+# Файловый обработчик
+file_handler = logging.FileHandler(LOG_DIR / "gateway.log", encoding="utf-8")
+file_handler.setLevel(logging.DEBUG)
+file_formatter = logging.Formatter(
+    fmt="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+file_handler.setFormatter(file_formatter)
+
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SPOT_WS_URL = os.getenv("SPOT_WS_URL", "ws://localhost:8765")
 FUTURES_WS_URL = os.getenv("FUTURES_WS_URL", "ws://localhost:8766")
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 CURRENT_MODE = "spot"
 
@@ -46,11 +72,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_spot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global CURRENT_MODE
     CURRENT_MODE = "spot"
+    logger.info("Mode switched to SPOT")
     await update.message.reply_text(f"Режим: SPOT\nWebSocket: {SPOT_WS_URL}")
 
 async def cmd_futures(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global CURRENT_MODE
     CURRENT_MODE = "futures"
+    logger.info("Mode switched to FUTURES")
     await update.message.reply_text(f"Режим: FUTURES\nWebSocket: {FUTURES_WS_URL}")
 
 # ---------- Пересылка сигналов ----------
@@ -68,6 +96,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
     text = update.message.text.strip()
+    logger.info(f"Received signal from Telegram: {text}")
     await forward_to_ws(text)
     await update.message.reply_text(f"Сигнал отправлен в {CURRENT_MODE.upper()} бот.")
 
@@ -84,6 +113,7 @@ def main():
     app.add_handler(CommandHandler("futures", cmd_futures))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    logger.info("Telegram gateway started. Use /spot or /futures.")
     print("🚀 Telegram gateway started. Use /spot or /futures.")
     app.run_polling(drop_pending_updates=True)
 
