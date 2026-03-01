@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import re
+import signal
 from datetime import datetime
 from pathlib import Path
 
@@ -45,6 +46,16 @@ file_handler.setFormatter(file_formatter)
 
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
+
+# Graceful shutdown
+shutdown_event = asyncio.Event()
+
+def handle_shutdown(signum, frame):
+    logger.info(f"Received signal {signum}, shutting down...")
+    shutdown_event.set()
+
+signal.signal(signal.SIGINT, handle_shutdown)
+signal.signal(signal.SIGTERM, handle_shutdown)
 
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
@@ -225,7 +236,15 @@ async def main():
     logger.info(f"WebSocket server: ws://localhost:{WS_PORT}")
     server = await websockets.serve(websocket_handler, "localhost", WS_PORT)
     logger.info("Spot bot ready, waiting for signals...")
+    
+    # Ждём сигнала остановки
+    await shutdown_event.wait()
+    
+    # Graceful shutdown
+    logger.info("Closing WebSocket server...")
+    server.close()
     await server.wait_closed()
+    logger.info("Spot bot stopped gracefully")
 
 if __name__ == "__main__":
     asyncio.run(main())

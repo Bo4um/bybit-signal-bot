@@ -103,6 +103,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- Запуск ----------
 
 def main():
+    import signal as sig
+    
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в .env")
 
@@ -115,7 +117,17 @@ def main():
 
     logger.info("Telegram gateway started. Use /spot or /futures.")
     print("🚀 Telegram gateway started. Use /spot or /futures.")
+    
+    # Graceful shutdown handler
+    def handle_shutdown(signum, frame):
+        logger.info(f"Received signal {signum}, shutting down...")
+        app.stop()
+    
+    sig.signal(sig.SIGINT, handle_shutdown)
+    sig.signal(sig.SIGTERM, handle_shutdown)
+    
     app.run_polling(drop_pending_updates=True)
+    logger.info("Telegram gateway stopped gracefully")
 
 if __name__ == "__main__":
     main()
