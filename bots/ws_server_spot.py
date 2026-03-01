@@ -79,6 +79,38 @@ def parse_signal(message: str):
         return "sell", [t.upper() for t in tickers]
     return None, []
 
+# ---------- Валидация ----------
+
+TICKER_PATTERN = re.compile(r'^[A-Z]{1,10}$')  # 1-10 заглавных букв
+
+def validate_ticker_format(ticker: str) -> bool:
+    """Проверка формата тикера (только буквы, 1-10 символов)."""
+    return bool(TICKER_PATTERN.match(ticker))
+
+def validate_ticker_exists(session: HTTP, ticker: str, category: str) -> bool:
+    """Проверка существования тикера на бирже."""
+    try:
+        r = session.get_instruments_info(category=category, symbol=f"{ticker}USDT")
+        lst = r.get("result", {}).get("list", [])
+        return len(lst) > 0
+    except Exception as e:
+        logger.error(f"validate_ticker_exists {ticker}: {e}")
+        return False
+
+def validate_tickers(session: HTTP, tickers: list[str], category: str) -> list[str]:
+    """Валидация списка тикеров. Возвращает только корректные."""
+    valid = []
+    for ticker in tickers:
+        if not validate_ticker_format(ticker):
+            logger.warning(f"Invalid ticker format: {ticker}")
+            continue
+        if not validate_ticker_exists(session, ticker, category):
+            logger.warning(f"Ticker not found on {category}: {ticker}")
+            continue
+        valid.append(ticker)
+        logger.info(f"Ticker validated: {ticker}")
+    return valid
+
 # ---------- Bybit helpers ----------
 
 def create_session() -> HTTP:
@@ -187,16 +219,22 @@ async def handle_signal(signal_text: str):
         logger.warning(f"IGNORE unknown signal: {signal_text}")
         return
 
-    side = "Buy" if action == "buy" else "Sell"
-    logger.info(f"SIGNAL: {signal_text} → {action.upper()} {symbols}, amount={TRADE_AMOUNT_USD} USDT")
-
     try:
         session = create_session()
     except Exception as e:
         logger.error(f"create_session: {e}")
         return
 
-    for ticker in symbols:
+    # Валидация тикеров
+    valid_symbols = validate_tickers(session, symbols, category="spot")
+    if not valid_symbols:
+        logger.error(f"No valid tickers in signal: {symbols}")
+        return
+
+    side = "Buy" if action == "buy" else "Sell"
+    logger.info(f"SIGNAL: {signal_text} → {action.upper()} {valid_symbols}, amount={TRADE_AMOUNT_USD} USDT")
+
+    for ticker in valid_symbols:
         logger.info(f"Working {ticker}USDT ...")
         try:
             resp, base_qty_est = await place_spot_market_order(session, ticker, side)
