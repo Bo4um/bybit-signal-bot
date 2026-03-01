@@ -10,6 +10,8 @@ import logging
 import os
 import re
 import signal
+import time
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -56,6 +58,56 @@ def handle_shutdown(signum, frame):
 
 signal.signal(signal.SIGINT, handle_shutdown)
 signal.signal(signal.SIGTERM, handle_shutdown)
+
+# ---------- Обработка ошибок API ----------
+
+RETRYABLE_CODES = {10002, 10003, 10004, 10005, 10006, 10016}  # Временные ошибки
+MAX_RETRIES = 3
+BASE_DELAY = 1.0  # секунды
+
+class APIError(Exception):
+    """Ошибка API Bybit."""
+    def __init__(self, ret_code: int, ret_msg: str, retryable: bool = False):
+        self.ret_code = ret_code
+        self.ret_msg = ret_msg
+        self.retryable = retryable
+        super().__init__(f"API Error {ret_code}: {ret_msg}")
+
+def with_retry(func):
+    """Декоратор для повторных попыток при временных ошибках API."""
+    def wrapper(*args, **kwargs):
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                result = func(*args, **kwargs)
+                # Проверка кода ответа
+                if isinstance(result, dict):
+                    ret_code = result.get("retCode", 0)
+                    ret_msg = result.get("retMsg", "")
+                    if ret_code != 0:
+                        retryable = ret_code in RETRYABLE_CODES
+                        error = APIError(ret_code, ret_msg, retryable)
+                        logger.warning(f"API error (attempt {attempt + 1}/{MAX_RETRIES}): {ret_code} - {ret_msg}")
+                        if retryable and attempt < MAX_RETRIES - 1:
+                            delay = BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
+                            logger.info(f"Retrying in {delay:.2f}s...")
+                            time.sleep(delay)
+                            continue
+                        raise error
+                return result
+            except APIError:
+                raise
+            except Exception as e:
+                last_error = e
+                logger.error(f"API call error (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
+                if attempt < MAX_RETRIES - 1:
+                    delay = BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
+                    logger.info(f"Retrying in {delay:.2f}s...")
+                    time.sleep(delay)
+                else:
+                    raise APIError(-1, str(last_error), retryable=True)
+        return None
+    return wrapper
 
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
@@ -132,6 +184,9 @@ def get_last_price(session, symbol: str):
             logger.warning(f"No ticker {symbol}USDT in get_tickers")
             return None
         return float(lst[0]["lastPrice"])
+    except APIError as e:
+        logger.error(f"get_tickers {symbol}: {e.ret_code} - {e.ret_msg}")
+        return None
     except Exception as e:
         logger.error(f"get_tickers {symbol}: {e}")
         return None
@@ -150,6 +205,9 @@ def get_instrument_info(session, symbol: str):
         qty_step = float(lot_filter.get("qtyStep", "0.0001"))
         min_qty = float(lot_filter.get("minOrderQty", "0.0001"))
         return {"tickSize": tick_size, "qtyStep": qty_step, "minQty": min_qty}
+    except APIError as e:
+        logger.error(f"get_instruments_info {symbol}: {e.ret_code} - {e.ret_msg}")
+        return None
     except Exception as e:
         logger.error(f"get_instruments_info {symbol}: {e}")
         return None
@@ -157,7 +215,8 @@ def get_instrument_info(session, symbol: str):
 def round_down(value: float, step: float) -> float:
     return (value // step) * step
 
-async def place_spot_market_order(session, symbol: str, side: str):
+@with_retry
+def place_spot_market_order(session, symbol: str, side: str):
     params = {
         "category": "spot",
         "symbol": f"{symbol}USDT",
@@ -175,7 +234,8 @@ async def place_spot_market_order(session, symbol: str, side: str):
         base_qty = TRADE_AMOUNT_USD / last
     return resp, base_qty
 
-async def place_spot_tp_limit_order(session, symbol: str, base_qty: float):
+@with_retry
+def place_spot_tp_limit_order(session, symbol: str, base_qty: float):
     info = get_instrument_info(session, symbol)
     if not info:
         logger.warning("No instrument info, skip TP")
@@ -237,7 +297,7 @@ async def handle_signal(signal_text: str):
     for ticker in valid_symbols:
         logger.info(f"Working {ticker}USDT ...")
         try:
-            resp, base_qty_est = await place_spot_market_order(session, ticker, side)
+            resp, base_qty_est = place_spot_market_order(session, ticker, side)
             if resp.get("retCode") != 0:
                 logger.error(f"Market order rejected: {resp}")
                 continue
@@ -246,13 +306,18 @@ async def handle_signal(signal_text: str):
             base_log = f"{action_word} {ticker} на {TRADE_AMOUNT_USD}$"
 
             if side == "Buy" and base_qty_est:
-                tp_resp = await place_spot_tp_limit_order(session, ticker, base_qty_est)
+                tp_resp = place_spot_tp_limit_order(session, ticker, base_qty_est)
                 if tp_resp and tp_resp.get("retCode") == 0:
                     logger.info(f"{base_log} + TP-limit set")
                 else:
                     logger.info(f"{base_log}, TP-limit not set")
             else:
                 logger.info(f"{base_log}, TP not set (Sell or no qty)")
+        except APIError as e:
+            if e.retryable:
+                logger.error(f"Temporary API error for {ticker}: {e.ret_code} - {e.ret_msg}")
+            else:
+                logger.error(f"Critical API error for {ticker}: {e.ret_code} - {e.ret_msg}")
         except Exception as e:
             logger.error(f"Processing {ticker}: {e}")
 

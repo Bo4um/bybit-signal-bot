@@ -10,6 +10,8 @@ import logging
 import os
 import re
 import signal
+import time
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -56,6 +58,56 @@ def handle_shutdown(signum, frame):
 
 signal.signal(signal.SIGINT, handle_shutdown)
 signal.signal(signal.SIGTERM, handle_shutdown)
+
+# ---------- Обработка ошибок API ----------
+
+RETRYABLE_CODES = {10002, 10003, 10004, 10005, 10006, 10016}  # Временные ошибки
+MAX_RETRIES = 3
+BASE_DELAY = 1.0  # секунды
+
+class APIError(Exception):
+    """Ошибка API Bybit."""
+    def __init__(self, ret_code: int, ret_msg: str, retryable: bool = False):
+        self.ret_code = ret_code
+        self.ret_msg = ret_msg
+        self.retryable = retryable
+        super().__init__(f"API Error {ret_code}: {ret_msg}")
+
+def with_retry(func):
+    """Декоратор для повторных попыток при временных ошибках API."""
+    def wrapper(*args, **kwargs):
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                result = func(*args, **kwargs)
+                # Проверка кода ответа
+                if isinstance(result, dict):
+                    ret_code = result.get("retCode", 0)
+                    ret_msg = result.get("retMsg", "")
+                    if ret_code != 0:
+                        retryable = ret_code in RETRYABLE_CODES
+                        error = APIError(ret_code, ret_msg, retryable)
+                        logger.warning(f"API error (attempt {attempt + 1}/{MAX_RETRIES}): {ret_code} - {ret_msg}")
+                        if retryable and attempt < MAX_RETRIES - 1:
+                            delay = BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
+                            logger.info(f"Retrying in {delay:.2f}s...")
+                            time.sleep(delay)
+                            continue
+                        raise error
+                return result
+            except APIError:
+                raise
+            except Exception as e:
+                last_error = e
+                logger.error(f"API call error (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
+                if attempt < MAX_RETRIES - 1:
+                    delay = BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
+                    logger.info(f"Retrying in {delay:.2f}s...")
+                    time.sleep(delay)
+                else:
+                    raise APIError(-1, str(last_error), retryable=True)
+        return None
+    return wrapper
 
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
@@ -133,6 +185,9 @@ def get_last_price(session, symbol: str):
             logger.warning(f"No ticker {symbol}USDT (linear)")
             return None
         return float(lst[0]["lastPrice"])
+    except APIError as e:
+        logger.error(f"get_tickers linear {symbol}: {e.ret_code} - {e.ret_msg}")
+        return None
     except Exception as e:
         logger.error(f"get_tickers linear {symbol}: {e}")
         return None
@@ -149,6 +204,9 @@ def get_linear_instrument_info(session, symbol: str):
         min_qty = float(lot.get("minOrderQty", "0.001"))
         qty_step = float(lot.get("qtyStep", "0.001"))
         return {"minQty": min_qty, "qtyStep": qty_step}
+    except APIError as e:
+        logger.error(f"get_instruments_info linear {symbol}: {e.ret_code} - {e.ret_msg}")
+        return None
     except Exception as e:
         logger.error(f"get_instruments_info linear {symbol}: {e}")
         return None
@@ -166,6 +224,8 @@ def set_leverage(session, symbol: str):
             sellLeverage=str(LEVERAGE),
         )
         logger.info(f"set_leverage: {resp.get('retCode')} {resp.get('retMsg')}")
+    except APIError as e:
+        logger.error(f"set_leverage {symbol}: {e.ret_code} - {e.ret_msg}")
     except Exception as e:
         logger.error(f"set_leverage {symbol}: {e}")
 
@@ -180,7 +240,8 @@ def calc_qty_usdt(session, symbol: str, last_price: float) -> float:
     qty = round_up_to_step(qty, step)
     return qty
 
-async def open_linear_position(session, symbol: str, direction: str):
+@with_retry
+def open_linear_position(session, symbol: str, direction: str):
     last = get_last_price(session, symbol)
     if not last:
         logger.warning("No price, skip position")
@@ -208,6 +269,7 @@ async def open_linear_position(session, symbol: str, direction: str):
 
     return {"side": side, "entry_price": last, "qty": qty}
 
+@with_retry
 def set_tp_for_position(session, symbol: str, entry_price: float, side: str):
     if side == "Buy":
         tp_price = entry_price * (1 + TP_PCT)
@@ -253,7 +315,7 @@ async def handle_signal(signal_text: str):
     for ticker in valid_symbols:
         logger.info(f"Working {ticker}USDT linear ...")
         try:
-            pos = await open_linear_position(session, ticker, action)
+            pos = open_linear_position(session, ticker, action)
             if not pos:
                 logger.error(f"Position not opened for {ticker}")
                 continue
@@ -265,6 +327,11 @@ async def handle_signal(signal_text: str):
                 logger.info(f"{ts} {direction} {ticker} with TP set")
             else:
                 logger.info(f"{ts} {direction} {ticker}, TP not set")
+        except APIError as e:
+            if e.retryable:
+                logger.error(f"Temporary API error for {ticker}: {e.ret_code} - {e.ret_msg}")
+            else:
+                logger.error(f"Critical API error for {ticker}: {e.ret_code} - {e.ret_msg}")
         except Exception as e:
             logger.error(f"Processing {ticker}: {e}")
 
