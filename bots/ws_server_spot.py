@@ -62,6 +62,11 @@ signal.signal(signal.SIGTERM, handle_shutdown)
 # ---------- Обработка ошибок API ----------
 
 RETRYABLE_CODES = {10002, 10003, 10004, 10005, 10006, 10016}  # Временные ошибки
+NON_RETRYABLE_CODES = {
+    170380,  # no active orders for this pair
+    170137,  # Order quantity has too many decimals
+    170150,  # Insufficient balance
+}
 MAX_RETRIES = 3
 BASE_DELAY = 1.0  # секунды
 
@@ -85,7 +90,7 @@ def with_retry(func):
                     ret_code = result.get("retCode", 0)
                     ret_msg = result.get("retMsg", "")
                     if ret_code != 0:
-                        retryable = ret_code in RETRYABLE_CODES
+                        retryable = ret_code in RETRYABLE_CODES and ret_code not in NON_RETRYABLE_CODES
                         error = APIError(ret_code, ret_msg, retryable)
                         logger.warning(f"API error (attempt {attempt + 1}/{MAX_RETRIES}): {ret_code} - {ret_msg}")
                         if retryable and attempt < MAX_RETRIES - 1:
@@ -248,6 +253,18 @@ def get_instrument_info(session, symbol: str):
 def round_down(value: float, step: float) -> float:
     return (value // step) * step
 
+def format_decimal(value: float, step: float) -> str:
+    """Format decimal value according to step precision to avoid 'too many decimals' error."""
+    import math
+    # Calculate the number of decimal places from step
+    if step >= 1:
+        decimals = 0
+    else:
+        decimals = max(0, -int(math.floor(math.log10(step))))
+    # Round to the calculated precision and format
+    formatted = f"{value:.{decimals}f}"
+    return formatted
+
 @with_retry
 def place_spot_market_order(session, symbol: str, side: str):
     params = {
@@ -287,8 +304,8 @@ def place_spot_tp_limit_order(session, symbol: str, base_qty: float):
     qty_raw = max(base_qty, min_qty)
     qty = round_down(qty_raw, step)
 
-    price_str = f"{tp_price:.8f}".rstrip("0").rstrip(".")
-    qty_str = f"{qty:.8f}".rstrip("0").rstrip(".")
+    price_str = format_decimal(tp_price, tick)
+    qty_str = format_decimal(qty, step)
 
     params = {
         "category": "spot",
@@ -352,10 +369,13 @@ async def handle_signal(signal_text: str):
             else:
                 logger.info(f"{base_log}, TP not set (Sell or no qty)")
         except APIError as e:
-            if e.retryable:
+            if e.ret_code == 170380:
+                # no active orders for this pair - occurs when trying to sell without existing position
+                logger.error(f"Cannot sell {ticker}: no active position/order exists (ErrCode: {e.ret_code})")
+            elif e.retryable:
                 logger.error(f"Temporary API error for {ticker}: {e.ret_code} - {e.ret_msg}")
             else:
-                logger.error(f"Critical API error for {ticker}: {e.ret_code} - {e.ret_msg}")
+                logger.error(f"Critical API error for {ticker}: {e.ret_code} - {e.ret_msg} ({e.ret_msg})")
         except Exception as e:
             logger.error(f"Processing {ticker}: {e}")
 
